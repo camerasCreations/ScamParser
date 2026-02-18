@@ -1,3 +1,5 @@
 fast_parse.py
 *.txt
 *.json
+*.eml
+__pycache__/utils.cpython-314.pyc
