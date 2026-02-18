@@ -12,6 +12,9 @@ from utils import (
     get_abuse_emails_for_domain,
     get_abuse_emails_for_ip,
     generate_abuse_email,
+    generate_eml_file,
+    validate_email,
+    parse_eml_file,
 )
 
 # Config file path
@@ -57,23 +60,35 @@ def setup_user_info():
 
 
 def get_email_headers():
-    """Get email headers from user input or file."""
+    """Get email headers from user input, text file, or .eml file."""
     print("\n" + "="*60)
     print("INPUT EMAIL HEADERS")
     print("="*60)
     print("Choose input method:")
     print("1. Paste headers directly (end with blank line)")
-    print("2. Load from file")
-    choice = input("\nEnter choice (1 or 2): ").strip()
+    print("2. Load from text file")
+    print("3. Load from .eml file (Gmail export)")
+    choice = input("\nEnter choice (1, 2, or 3): ").strip()
 
     if choice == "2":
         file_path = input("Enter file path: ").strip()
         try:
             with open(file_path, "r", encoding="utf-8") as f:
-                return f.read()
+                return f.read(), None  # Return (headers_str, original_eml_content)
         except FileNotFoundError:
             print(f"✗ File not found: {file_path}")
-            return None
+            return None, None
+    elif choice == "3":
+        file_path = input("Enter .eml file path: ").strip()
+        # Remove quotes if present
+        file_path = file_path.strip('"').strip("'")
+        headers_str, eml_content = parse_eml_file(file_path)
+        if headers_str:
+            print(f"✓ Successfully parsed .eml file")
+            print(f"  Extracted {len(headers_str.splitlines())} header lines")
+            return headers_str, eml_content  # Return both headers and full .eml content
+        else:
+            return None, None
     else:
         print("\nPaste email headers below (enter a blank line when done):\n")
         lines = []
@@ -87,11 +102,13 @@ def get_email_headers():
                     lines.append(line)
             except EOFError:
                 break
-        return "\n".join(lines) if lines else None
+        return "\n".join(lines) if lines else None, None  # Return (headers_str, None)
 
 
-def parse_and_report(headers_str, user_config):
-    """Parse headers and generate abuse reports with date-based file."""
+def parse_and_report(headers_str, user_config, original_eml_content=None):
+    """Parse headers and generate abuse reports with date-based file.
+    If original_eml_content is provided, it will be attached to the .eml report.
+    """
     print("\n" + "="*60)
     print("PARSING EMAIL HEADERS")
     print("="*60)
@@ -126,9 +143,9 @@ def parse_and_report(headers_str, user_config):
         emails = get_abuse_emails_for_domain(domain, timeout=10, max_retries=1)
         if emails:
             all_abuse_emails.extend(emails)
-            print(f"OK - {len(emails)} contact(s)")
+            print(f"OK - {len(emails)} valid contact(s)")
         else:
-            print("no contacts found")
+            print("no valid contacts found")
 
     print("\nLooking up IP WHOIS information...")
     total_ips = len(ips)
@@ -137,15 +154,18 @@ def parse_and_report(headers_str, user_config):
         emails = get_abuse_emails_for_ip(ip, timeout=10, max_retries=1)
         if emails:
             all_abuse_emails.extend(emails)
-            print(f"OK - {len(emails)} contact(s)")
+            print(f"OK - {len(emails)} valid contact(s)")
         else:
-            print("no contacts found")
+            print("no valid contacts found")
 
     # Remove duplicates and sort
     unique_emails = sorted(set(all_abuse_emails))
+    
+    print(f"\n✓ Email validation complete: {len(unique_emails)} valid email address(es) found")
 
     if not unique_emails:
-        print("\n✗ No abuse contacts found. You may need to manually search for them.")
+        print("\n✗ No valid abuse contacts found after email validation.")
+        print("  (Invalid or unreachable email addresses were filtered out)")
         return
 
     # Generate single email with all recipients in BCC
@@ -171,14 +191,33 @@ def parse_and_report(headers_str, user_config):
 
     # Save email to file with date-based name
     output_file = Path(filename)
-    with open(output_file, "w") as f:
+    with open(output_file, "w", encoding='utf-8') as f:
         f.write(email_body)
     print(f"✓ Email saved to {output_file}")
+
+    # Generate and save .eml file for Gmail import
+    eml_content, eml_filename = generate_eml_file(
+        user_config["name"],
+        user_config["email"],
+        domains,
+        ips,
+        bcc_list,
+        headers_str,
+        original_eml_content,  # Attach the original .eml if provided
+    )
+    eml_file = Path(eml_filename)
+    with open(eml_file, "w", encoding='utf-8') as f:
+        f.write(eml_content)
+    print(f"✓ Gmail-importable .eml file saved to {eml_file}")
+    if original_eml_content:
+        print(f"  → Original scam email attached as 'original_scam_email.eml'")
+    print(f"  → Import into Gmail: Settings → See all settings → Accounts and Import → Import mail and contacts")
 
     # Also save as JSON for reference
     json_file = Path(filename.replace('.txt', '.json'))
     json_data = {
         "filename": filename,
+        "eml_filename": eml_filename,
         "subject": subject,
         "to": to_recipient,
         "bcc": bcc_list,
@@ -214,11 +253,12 @@ def main():
                 print("\n✗ Please setup user information first (option 1)")
                 continue
 
-            headers = get_email_headers()
-            if headers:
-                parse_and_report(headers, user_config)
-            else:
+            headers_result = get_email_headers()
+            if headers_result is None or headers_result[0] is None:
                 print("✗ No headers provided.")
+            else:
+                headers_str, original_eml_content = headers_result
+                parse_and_report(headers_str, user_config, original_eml_content)
         elif choice == "3":
             print("\nGoodbye!")
             break
